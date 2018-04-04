@@ -18,20 +18,23 @@ Environment=GOTRACEBACK=crash
 ExecReload=/bin/kill -s HUP $MAINPID
 Delegate=yes
 KillMode=process
-ExecStart={{ docker_bin_dir }}/docker daemon \
+ExecStart={{ docker_bin_dir }}/docker{% if installed_docker_version.stdout|version_compare('17.03', '<') %} daemon{% else %}d{% endif %} \
           $DOCKER_OPTS \
           $DOCKER_STORAGE_OPTIONS \
           $DOCKER_NETWORK_OPTIONS \
           $DOCKER_DNS_OPTIONS \
           $INSECURE_REGISTRY
-{% if ansible_os_family == "RedHat" and systemd_version.stdout|int >= 226 %}
+{% if not is_atomic and systemd_version.stdout|int >= 226 %}
 TasksMax=infinity
 {% endif %}
 LimitNOFILE=1048576
 LimitNPROC=1048576
 LimitCORE=infinity
 TimeoutStartSec=1min
-Restart=on-abnormal
+# restart the docker process if it exits prematurely
+Restart=on-failure
+StartLimitBurst=3
+StartLimitInterval=60s
 
 [Install]
 WantedBy=multi-user.target

@@ -3,34 +3,45 @@
 
 require 'fileutils'
 
-Vagrant.require_version ">= 1.8.0"
+Vagrant.require_version ">= 2.0.0"
 
 CONFIG = File.join(File.dirname(__FILE__), "vagrant/config.rb")
 
 COREOS_URL_TEMPLATE = "https://storage.googleapis.com/%s.release.core-os.net/amd64-usr/current/coreos_production_vagrant.json"
+
+# Uniq disk UUID for libvirt
+DISK_UUID = Time.now.utc.to_i
 
 SUPPORTED_OS = {
   "coreos-stable" => {box: "coreos-stable",      bootstrap_os: "coreos", user: "core", box_url: COREOS_URL_TEMPLATE % ["stable"]},
   "coreos-alpha"  => {box: "coreos-alpha",       bootstrap_os: "coreos", user: "core", box_url: COREOS_URL_TEMPLATE % ["alpha"]},
   "coreos-beta"   => {box: "coreos-beta",        bootstrap_os: "coreos", user: "core", box_url: COREOS_URL_TEMPLATE % ["beta"]},
   "ubuntu"        => {box: "bento/ubuntu-16.04", bootstrap_os: "ubuntu", user: "vagrant"},
-  "centos"        => {box: "bento/centos-7.3",   bootstrap_os: "centos", user: "vagrant"},
+  "centos"        => {box: "centos/7",           bootstrap_os: "centos", user: "vagrant"},
 }
 
 # Defaults for config options defined in CONFIG
 $num_instances = 3
 $instance_name_prefix = "k8s"
 $vm_gui = false
-$vm_memory = 1536
+$vm_memory = 2048
 $vm_cpus = 1
 $shared_folders = {}
 $forwarded_ports = {}
 $subnet = "172.17.8"
 $os = "ubuntu"
+$network_plugin = "flannel"
 # The first three nodes are etcd servers
 $etcd_instances = $num_instances
-# The first two nodes are masters
+# The first two nodes are kube masters
 $kube_master_instances = $num_instances == 1 ? $num_instances : ($num_instances - 1)
+# All nodes are kube nodes
+$kube_node_instances = $num_instances
+# The following only works when using the libvirt provider
+$kube_node_instances_with_disks = false
+$kube_node_instances_with_disks_size = "20G"
+$kube_node_instances_with_disks_number = 2
+
 $local_release_dir = "/vagrant/temp"
 
 host_vars = {}
@@ -38,9 +49,6 @@ host_vars = {}
 if File.exist?(CONFIG)
   require CONFIG
 end
-
-# All nodes are kube nodes
-$kube_node_instances = $num_instances
 
 $box = SUPPORTED_OS[$os][:box]
 # if $inventory is not set, try to use example
@@ -53,7 +61,7 @@ if ! File.exist?(File.join(File.dirname($inventory), "hosts"))
                        "provisioners", "ansible")
   FileUtils.mkdir_p($vagrant_ansible) if ! File.exist?($vagrant_ansible)
   if ! File.exist?(File.join($vagrant_ansible,"inventory"))
-    FileUtils.ln_s($inventory, $vagrant_ansible)
+    FileUtils.ln_s($inventory, File.join($vagrant_ansible,"inventory"))
   end
 end
 
@@ -112,19 +120,35 @@ Vagrant.configure("2") do |config|
         vb.cpus = $vm_cpus
       end
 
+     config.vm.provider :libvirt do |lv|
+       lv.memory = $vm_memory
+     end
+
       ip = "#{$subnet}.#{i+100}"
       host_vars[vm_name] = {
         "ip": ip,
-        "flannel_interface": ip,
-        "flannel_backend_type": "host-gw",
+        "bootstrap_os": SUPPORTED_OS[$os][:bootstrap_os],
         "local_release_dir" => $local_release_dir,
         "download_run_once": "False",
-        # Override the default 'calico' with flannel.
-        # inventory/group_vars/k8s-cluster.yml
-        "kube_network_plugin": "flannel",
-        "bootstrap_os": SUPPORTED_OS[$os][:bootstrap_os]
+        "kube_network_plugin": $network_plugin
       }
+
       config.vm.network :private_network, ip: ip
+
+      # Disable swap for each vm
+      config.vm.provision "shell", inline: "swapoff -a"
+
+      if $kube_node_instances_with_disks
+        # Libvirt
+        driverletters = ('a'..'z').to_a
+        config.vm.provider :libvirt do |lv|
+          # always make /dev/sd{a/b/c} so that CI can ensure that
+          # virtualbox and libvirt will have the same devices to use for OSDs
+          (1..$kube_node_instances_with_disks_number).each do |d|
+            lv.storage :file, :device => "hd#{driverletters[d]}", :path => "disk-#{i}-#{d}-#{DISK_UUID}.disk", :size => $kube_node_instances_with_disks_size, :bus => "ide"
+          end
+        end
+      end
 
       # Only execute once the Ansible provisioner,
       # when all the machines are up and ready.
@@ -134,10 +158,10 @@ Vagrant.configure("2") do |config|
           if File.exist?(File.join(File.dirname($inventory), "hosts"))
             ansible.inventory_path = $inventory
           end
-          ansible.sudo = true
+          ansible.become = true
           ansible.limit = "all"
           ansible.host_key_checking = false
-          ansible.raw_arguments = ["--forks=#{$num_instances}"]
+          ansible.raw_arguments = ["--forks=#{$num_instances}", "--flush-cache"]
           ansible.host_vars = host_vars
           #ansible.tags = ['download']
           ansible.groups = {
