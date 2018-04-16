@@ -7,4 +7,3 @@ RUN pip install -r /opt/kubespray/requirements.txt
 RUN pip install docker-py==1.10.6
 
 WORKDIR /opt/kubespray
-
