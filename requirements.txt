@@ -1,4 +1,5 @@
 pbr>=1.6
+boto3>=1.7.26
 ansible>=2.4.0
 netaddr
 jinja2>=2.9.6
